@@ -1,0 +1,10 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+anthropic
+fastembed
+chromadb==0.5.0
+python-frontmatter==1.1.0
+pydantic==2.7.1
+python-dotenv==1.0.1
+watchdog==4.0.0
+requests

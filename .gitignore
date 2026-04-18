@@ -1,0 +1,18 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+
+# Fastembed cache
+*.onnx
+*.onnx.data
+
+# Demo vault
+demo-vault/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

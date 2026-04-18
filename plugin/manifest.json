@@ -1,0 +1,10 @@
+{
+  "id": "neural-vault-assistant",
+  "name": "Neural Vault Assistant",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "AI chat assistant powered by Claude that reads and writes your vault notes.",
+  "author": "Emilios Kalabogias",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
