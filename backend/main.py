@@ -4,6 +4,7 @@ Run with: uvicorn main:app --reload --port 8765
 """
 
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 from dotenv import load_dotenv
@@ -113,40 +114,31 @@ def health():
     return {"status": "ok", "vault": VAULT_PATH}
 
 
+def _process_reply(reply: str, user_message: str) -> tuple:
+    """Execute any note action, update history, return (display_reply, action_result)."""
+    action_result = writer.parse_and_execute(reply)
+    if action_result and action_result.get("status") in ("created", "updated", "appended"):
+        indexer.index_file(action_result["path"])
+
+    conversation_history.append({"role": "user", "content": user_message})
+    conversation_history.append({"role": "assistant", "content": reply})
+    if len(conversation_history) > 40:
+        conversation_history[:] = conversation_history[-40:]
+
+    display_reply = re.sub(r"```json\s*\{.*?\}\s*```", "", reply, flags=re.DOTALL).strip() if action_result else reply
+    return display_reply, action_result
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    global conversation_history
-
-    # 1. Retrieve relevant chunks from vault
     chunks = indexer.search(req.message, n_results=req.n_context)
 
-    # 2. Web search
     web_results = []
     if req.web_search and searcher.enabled:
         web_results = searcher.search(req.message, n_results=4)
 
-    # 3. Ask Claude
     reply = claude.chat(req.message, chunks, history=conversation_history, web_results=web_results)
-
-    # 3. Check if Claude wants to write a note
-    action_result = writer.parse_and_execute(reply)
-    if action_result and action_result.get("status") in ("created", "updated", "appended"):
-        # Re-index the affected file
-        indexer.index_file(action_result["path"])
-
-    # 4. Update conversation history
-    conversation_history.append({"role": "user", "content": req.message})
-    conversation_history.append({"role": "assistant", "content": reply})
-
-    # Keep history bounded
-    if len(conversation_history) > 40:
-        conversation_history = conversation_history[-40:]
-
-    # Clean up JSON block from the displayed reply if action was taken
-    display_reply = reply
-    if action_result:
-        import re
-        display_reply = re.sub(r"```json\s*\{.*?\}\s*```", "", reply, flags=re.DOTALL).strip()
+    display_reply, action_result = _process_reply(reply, req.message)
 
     return ChatResponse(reply=display_reply, sources=chunks, web_results=web_results, action_result=action_result)
 
@@ -154,7 +146,7 @@ def chat(req: ChatRequest):
 @app.post("/reindex", response_model=ReindexResponse)
 def reindex():
     indexer.index_all()
-    return ReindexResponse(status="ok", note_count=indexer.collection.count())
+    return ReindexResponse(status="ok", note_count=indexer.count())
 
 
 @app.get("/graph")
@@ -178,8 +170,6 @@ def read_note(req: NoteReadRequest):
 
 @app.post("/chat/image", response_model=ChatResponse)
 def chat_image(req: ImageChatRequest):
-    global conversation_history
-
     chunks = indexer.search(req.message, n_results=req.n_context)
 
     web_results = []
@@ -194,20 +184,7 @@ def chat_image(req: ImageChatRequest):
         history=conversation_history,
         web_results=web_results,
     )
-
-    action_result = writer.parse_and_execute(reply)
-    if action_result and action_result.get("status") in ("created", "updated", "appended"):
-        indexer.index_file(action_result["path"])
-
-    conversation_history.append({"role": "user", "content": f"[Image] {req.message}"})
-    conversation_history.append({"role": "assistant", "content": reply})
-    if len(conversation_history) > 40:
-        conversation_history = conversation_history[-40:]
-
-    import re
-    display_reply = reply
-    if action_result:
-        display_reply = re.sub(r"```json\s*\{.*?\}\s*```", "", reply, flags=re.DOTALL).strip()
+    display_reply, action_result = _process_reply(reply, f"[Image] {req.message}")
 
     return ChatResponse(reply=display_reply, sources=chunks, web_results=web_results, action_result=action_result)
 

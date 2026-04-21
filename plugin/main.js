@@ -109,6 +109,7 @@ class NeuralGraph {
     this.nodes = [];
     this.edges = [];
     this.nodeMap = {};
+    this._adj = {};
     this.signals = [];
     this.bursts = [];
     this.fireTimes = {};
@@ -121,6 +122,8 @@ class NeuralGraph {
     this.highlightedNodes = new Set();
     this._raf = null;
     this._lastT = 0;
+    this._bgCache = null; // offscreen canvas for background blobs
+    this._bgW = 0; this._bgH = 0;
     this._setupEvents();
   }
 
@@ -139,6 +142,11 @@ class NeuralGraph {
     this.edges = edges.map(e => ({ ...e, cp: null, nextSpawn: 0, hlNextSpawn: 0 }));
     this.nodeMap = {};
     for (const n of this.nodes) this.nodeMap[n.id] = n;
+    this._adj = {};
+    for (const e of this.edges) {
+      (this._adj[e.source] = this._adj[e.source] || []).push(e);
+      (this._adj[e.target] = this._adj[e.target] || []).push(e);
+    }
     this._computeCPs();
     this.alpha = 1;
     this.signals = [];
@@ -268,7 +276,7 @@ class NeuralGraph {
           this.bursts.push(new SynapticBurst(tgt.x, tgt.y, s.color));
           // Cascade: spawn signals from the fired node
           if (Math.random() < 0.35 && this.signals.length < 18) {
-            const out = this.edges.filter(e => e.source === s.target || e.target === s.target);
+            const out = this._adj[s.target] || [];
             for (const e of out) {
               if (this.signals.length >= 18) break;
               const nextId = e.source === s.target ? e.target : e.source;
@@ -309,7 +317,7 @@ class NeuralGraph {
     // Highlighted nodes fire more often
     for (const nodeId of this.highlightedNodes) {
       if (this.signals.length >= 18) break;
-      const connEdges = this.edges.filter(e => e.source === nodeId || e.target === nodeId);
+      const connEdges = this._adj[nodeId] || [];
       for (const e of connEdges) {
         if (this.signals.length >= 18) break;
         if (now >= e.hlNextSpawn) {
@@ -335,28 +343,34 @@ class NeuralGraph {
     ctx.fillStyle = '#07050f';
     ctx.fillRect(0, 0, w, h);
 
-    // Brain tissue texture — subtle organic blobs
-    const blobs = [
-      { x: .18, y: .28, rx: .30, ry: .22, c: '#1a0a2e' },
-      { x: .72, y: .62, rx: .28, ry: .32, c: '#0e1428' },
-      { x: .50, y: .15, rx: .22, ry: .18, c: '#12082a' },
-      { x: .15, y: .72, rx: .20, ry: .18, c: '#0a1420' },
-      { x: .82, y: .22, rx: .18, ry: .22, c: '#1a0820' },
-      { x: .50, y: .80, rx: .35, ry: .18, c: '#0c1020' },
-    ];
-    for (const b of blobs) {
-      ctx.save();
-      ctx.translate(b.x * w, b.y * h);
-      ctx.scale(b.rx * w / 100, b.ry * h / 100);
-      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 100);
-      g.addColorStop(0, b.c);
-      g.addColorStop(1, 'transparent');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(0, 0, 100, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+    // Brain tissue texture — rendered once to offscreen canvas, reused each frame
+    if (!this._bgCache || this._bgW !== w || this._bgH !== h) {
+      this._bgW = w; this._bgH = h;
+      this._bgCache = new OffscreenCanvas(w, h);
+      const bc = this._bgCache.getContext('2d');
+      const blobs = [
+        { x: .18, y: .28, rx: .30, ry: .22, c: '#1a0a2e' },
+        { x: .72, y: .62, rx: .28, ry: .32, c: '#0e1428' },
+        { x: .50, y: .15, rx: .22, ry: .18, c: '#12082a' },
+        { x: .15, y: .72, rx: .20, ry: .18, c: '#0a1420' },
+        { x: .82, y: .22, rx: .18, ry: .22, c: '#1a0820' },
+        { x: .50, y: .80, rx: .35, ry: .18, c: '#0c1020' },
+      ];
+      for (const b of blobs) {
+        bc.save();
+        bc.translate(b.x * w, b.y * h);
+        bc.scale(b.rx * w / 100, b.ry * h / 100);
+        const g = bc.createRadialGradient(0, 0, 0, 0, 0, 100);
+        g.addColorStop(0, b.c);
+        g.addColorStop(1, 'transparent');
+        bc.fillStyle = g;
+        bc.beginPath();
+        bc.arc(0, 0, 100, 0, Math.PI * 2);
+        bc.fill();
+        bc.restore();
+      }
     }
+    ctx.drawImage(this._bgCache, 0, 0);
 
     // ── Graph layer ─────────────────────────────────────────────────────────
     ctx.save();
@@ -429,15 +443,25 @@ class NeuralGraph {
       ctx.shadowBlur = isHov ? 40 : isSrc ? 28 : justFired ? 35 : 14;
       ctx.shadowColor = justFired ? '#ffffff' : nd.color;
 
-      // Soma body
-      ctx.beginPath();
-      ctx.arc(nd.x, nd.y, r, 0, Math.PI * 2);
-      const grad = ctx.createRadialGradient(nd.x - r * 0.3, nd.y - r * 0.3, 0, nd.x, nd.y, r);
-      grad.addColorStop(0, nd.color + (isHov ? 'ff' : 'cc'));
-      grad.addColorStop(0.6, nd.color + (isHov ? 'dd' : 'aa'));
-      grad.addColorStop(1, nd.color + '44');
-      ctx.fillStyle = grad;
-      ctx.fill();
+      // Soma body — gradient pre-rendered to offscreen canvas, rebuilt only when r or hover changes
+      const gradKey = `${r}|${isHov}`;
+      if (!nd._gradKey || nd._gradKey !== gradKey) {
+        nd._gradKey = gradKey;
+        const sz = Math.ceil(r * 2 + 2);
+        const og = new OffscreenCanvas(sz, sz);
+        const oc = og.getContext('2d');
+        const cx = sz / 2, cy = sz / 2;
+        const g = oc.createRadialGradient(cx - r * 0.3, cy - r * 0.3, 0, cx, cy, r);
+        g.addColorStop(0, nd.color + (isHov ? 'ff' : 'cc'));
+        g.addColorStop(0.6, nd.color + (isHov ? 'dd' : 'aa'));
+        g.addColorStop(1, nd.color + '44');
+        oc.fillStyle = g;
+        oc.beginPath();
+        oc.arc(cx, cy, r, 0, Math.PI * 2);
+        oc.fill();
+        nd._gradImg = og;
+      }
+      ctx.drawImage(nd._gradImg, nd.x - nd._gradImg.width / 2, nd.y - nd._gradImg.height / 2);
 
       // Bright nucleus
       ctx.shadowBlur = 0;
@@ -448,7 +472,6 @@ class NeuralGraph {
 
       // Fire ring
       if (justFired) {
-        const ringR = r + fireGlow * 0 + (1 - fireGlow) * 20;
         ctx.beginPath();
         ctx.arc(nd.x, nd.y, r + (1 - fireGlow) * 18, 0, Math.PI * 2);
         ctx.strokeStyle = nd.color + Math.floor(fireGlow * 160).toString(16).padStart(2, '0');
@@ -624,7 +647,8 @@ class NeuralGraph {
     });
 
     c.addEventListener('dblclick', (e) => {
-      if (!this._hitTest(this._toGraph(e).x, this._toGraph(e).y)) this.fitToScreen();
+      const gp = this._toGraph(e);
+      if (!this._hitTest(gp.x, gp.y)) this.fitToScreen();
     });
   }
 
@@ -757,7 +781,6 @@ class ChatView extends obsidian.ItemView {
     super(leaf);
     this.client = client;
     this.plugin = plugin;
-    this.messages = [];
     this.voiceEnabled = false;
     this.pendingImage = null;
   }
@@ -974,13 +997,12 @@ class ChatView extends obsidian.ItemView {
 
   async handleClear() {
     await this.client.clearHistory();
-    this.messages = []; this.messagesEl.empty();
+    this.messagesEl.empty();
     this.addSystemMessage("Conversation cleared.");
     if (window.speechSynthesis) window.speechSynthesis.cancel();
   }
 
   addMessage(msg) {
-    this.messages.push(msg);
     const el = this.messagesEl.createDiv({ cls: `nva-msg nva-msg-${msg.role}` });
     el.createDiv({ cls: "nva-msg-label" }).setText(msg.role === "user" ? "You" : msg.role === "assistant" ? "Assistant" : "System");
     if (msg.imageDataUrl) { const i = el.createEl("img", { cls: "nva-msg-image" }); i.src = msg.imageDataUrl; }

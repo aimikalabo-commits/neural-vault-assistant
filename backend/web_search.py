@@ -37,10 +37,3 @@ class WebSearch:
             print(f"[WebSearch] Error: {e}")
             return []
 
-    def format_for_context(self, results: List[Dict]) -> str:
-        if not results:
-            return ""
-        lines = ["## Web Search Results\n"]
-        for r in results:
-            lines.append(f"### {r['title']}\n{r['snippet']}\nSource: {r['url']}\n")
-        return "\n".join(lines)

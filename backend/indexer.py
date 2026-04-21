@@ -26,6 +26,7 @@ class VaultIndexer:
             name=CHROMA_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
+        self._graph_cache: dict | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -37,18 +38,21 @@ class VaultIndexer:
         print(f"[Indexer] Found {len(md_files)} notes — indexing...")
         for path in md_files:
             self._index_file(path)
+        self._graph_cache = None
         print(f"[Indexer] Done. {self.collection.count()} chunks in store.")
 
     def index_file(self, path: str):
         """Index or re-index a single file."""
         self._index_file(Path(path))
+        self._graph_cache = None
+
+    def count(self) -> int:
+        return self.collection.count()
 
     def delete_file(self, path: str):
         """Remove all chunks for a deleted/renamed file."""
-        doc_id_prefix = self._path_to_id(Path(path))
-        existing = self.collection.get(where={"source": path})
-        if existing["ids"]:
-            self.collection.delete(ids=existing["ids"])
+        self.collection.delete(where={"source": path})
+        self._graph_cache = None
 
     def search(self, query: str, n_results: int = 5) -> list[dict]:
         """Semantic search — returns top-n relevant note chunks."""
@@ -90,7 +94,10 @@ class VaultIndexer:
         return list(seen_titles.values())
 
     def get_graph(self) -> dict:
-        """Return nodes and edges for the knowledge graph."""
+        """Return nodes and edges for the knowledge graph (cached until vault changes)."""
+        if self._graph_cache is not None:
+            return self._graph_cache
+
         link_re = re.compile(r'\[\[([^\]|#]+?)(?:[|#][^\]]*)?\]\]')
         md_files = list(self.vault_path.rglob("*.md"))
         all_titles = {p.stem for p in md_files}
@@ -103,10 +110,7 @@ class VaultIndexer:
                 post = frontmatter.load(str(path))
                 links = [l.strip() for l in link_re.findall(post.content) if l.strip() in all_titles]
                 file_links[path.stem] = links
-                tags = post.get("tags", [])
-                if isinstance(tags, str):
-                    tags = [tags]
-                file_tags[path.stem] = tags if isinstance(tags, list) else []
+                file_tags[path.stem] = self._parse_tags(post)
             except Exception:
                 file_links[path.stem] = []
                 file_tags[path.stem] = []
@@ -134,7 +138,8 @@ class VaultIndexer:
             for p in md_files
         ]
 
-        return {"nodes": nodes, "edges": edges}
+        self._graph_cache = {"nodes": nodes, "edges": edges}
+        return self._graph_cache
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -149,19 +154,12 @@ class VaultIndexer:
             return
 
         title = path.stem
-        tags = ""
-        if isinstance(post.get("tags"), list):
-            tags = " ".join(post["tags"])
-        elif isinstance(post.get("tags"), str):
-            tags = post["tags"]
+        tags = " ".join(self._parse_tags(post))
 
         body = post.content
         chunks = self._chunk_text(body, title)
 
-        # Remove old chunks for this file before upserting
-        old = self.collection.get(where={"source": str(path)})
-        if old["ids"]:
-            self.collection.delete(ids=old["ids"])
+        self.collection.delete(where={"source": str(path)})
 
         if not chunks:
             return
@@ -179,6 +177,12 @@ class VaultIndexer:
             embeddings=embeddings,
             metadatas=metadatas,
         )
+
+    def _parse_tags(self, post) -> list[str]:
+        tags = post.get("tags", [])
+        if isinstance(tags, str):
+            return [tags]
+        return tags if isinstance(tags, list) else []
 
     def _chunk_text(self, text: str, title: str, max_chars: int = 800) -> list[str]:
         """Split text into overlapping chunks by heading or paragraph."""
@@ -212,15 +216,16 @@ class VaultWatcher(FileSystemEventHandler):
     def __init__(self, indexer: VaultIndexer):
         self.indexer = indexer
 
-    def on_modified(self, event):
+    def _reindex(self, event, label: str):
         if not event.is_directory and event.src_path.endswith(".md"):
-            print(f"[Watcher] Modified: {event.src_path}")
+            print(f"[Watcher] {label}: {event.src_path}")
             self.indexer.index_file(event.src_path)
 
+    def on_modified(self, event):
+        self._reindex(event, "Modified")
+
     def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith(".md"):
-            print(f"[Watcher] Created: {event.src_path}")
-            self.indexer.index_file(event.src_path)
+        self._reindex(event, "Created")
 
     def on_deleted(self, event):
         if not event.is_directory and event.src_path.endswith(".md"):
